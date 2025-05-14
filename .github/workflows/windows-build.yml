@@ -1,0 +1,87 @@
+name: build-windows-exe
+
+on:
+  workflow_dispatch:                # run by hand
+  push:                             # automatic run
+    branches: [ main ]              # commits to main
+    tags:     [ 'v*' ]              # or any tag starting with v
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+    # 1. Pull the repo
+    - uses: actions/checkout@v4
+
+    # 2. Python 3.11
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    # 3. Runtime + build deps
+    - name: Install Python deps
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller faster-whisper==1.1.1 gradio==4.17.0 numpy
+
+    # 3bis. Ensure ffmpeg.exe is available
+    - name: Ensure ffmpeg
+      shell: bash
+      run: |
+        if ! command -v ffmpeg &>/dev/null; then
+          curl -L -o ffmpeg.zip https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
+          unzip -q ffmpeg.zip
+          EXE_PATH=$(find ffmpeg-* -type f -name ffmpeg.exe | head -n1)
+          cp "$EXE_PATH" ./ffmpeg.exe
+        else
+          which ffmpeg | xargs -I{} cp {} ./ffmpeg.exe
+        fi
+
+    # 4. Grab the distil-Whisper FR model (≈2 GB)
+    - name: Download model
+      shell: bash                   # use Bash so the heredoc works
+      run: |
+        python - <<'PY'
+        from huggingface_hub import snapshot_download
+        snapshot_download(
+            repo_id='bofenghuang/whisper-large-v3-french-distil-dec16',
+            local_dir='models/fr-distil-v3-ct2-int8',
+            allow_patterns='ctranslate2/*'
+        )
+        PY
+
+    # 5. Build the single-file EXE
+    - name: PyInstaller
+      shell: bash                   # Bash again so “\” works
+      run: |
+        pyinstaller --onefile \
+          --add-data "models;models" \
+          --add-binary "ffmpeg.exe;." \
+          --hidden-import=ctranslate2 \
+          --noconsole \
+          app.py
+
+    # 6. Plain artifact (shows up in the Actions run)
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: Whisper-Transcriber-win
+        path: dist/app.exe
+
+    # 7. Attach to a Release – only when the ref **is a tag**
+    - name: Publish to GitHub Release
+      if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ github.ref_name }}   # e.g. v1.2.3  (or set to 'nightly')
+        name: "Latest build"
+        files: dist/app.exe
+        draft: false
+        prerelease: true
+
+# usage:
+# git tag v1.0.0
+# git push origin v1.0.0
